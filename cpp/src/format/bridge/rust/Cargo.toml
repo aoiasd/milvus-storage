@@ -26,6 +26,7 @@ arrow-schema = "56.2.0"
 # Vortex Ecosystem
 vortex = "0.56.0"
 vortex-io = { version = "0.56.0", features = ["tokio"] }
+vortex-layout = "0.56.0"
 
 # Lance Ecosystem
 lance = "1.0.0"
