@@ -6374,6 +6374,8 @@ dependencies = [
  "aws-credential-types",
  "base64",
  "bytes",
+ "async-stream",
+ "async-trait",
  "chrono",
  "cxx",
  "cxx-build",
