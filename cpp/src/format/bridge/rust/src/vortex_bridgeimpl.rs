@@ -1599,14 +1599,20 @@ pub(crate) unsafe fn open_file(
             .map_err(VortexError::from)
     })?;
 
-    Ok(Box::new(VortexFile {
+    let mut file = Box::new(VortexFile {
         inner: file,
         fswrapper: crate::filesystem_c::ThreadSafePtr::new(fswrapper_ptr as *mut c_void),
         path: path.to_string(),
         file_size,
         default_window: CoalescingWindowKey::from_ffi(&default_window),
         views_by_window: Mutex::new(HashMap::new()),
-    }))
+    });
+
+    // Opening the footer can read beyond the footer tail and populate Vortex's
+    // initial segment cache. Sparse files may not contain those segments yet,
+    // so rebuild the long-lived view from the parsed footer without that cache.
+    file.inner = file.open(&default_window)?;
+    Ok(file)
 }
 
 pub(crate) struct VortexScanBuilder {

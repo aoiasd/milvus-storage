@@ -554,6 +554,40 @@ TEST_F(VortexLocalFormatTest, TestReadByPlanEmptyRangeReturnsEmptyStream) {
   ASSERT_EQ(chunked_array->length(), 0);
 }
 
+TEST_F(VortexLocalFormatTest, TestReaderOpenedBeforeSparseCellsCanBeReused) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+
+  constexpr const char* kSparsePath = "test-file.vx.sparse";
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto footer_reader = MakeFooterReader(cgfile, sparse_fs);
+  ASSERT_STATUS_OK(footer_reader->Open(file_system_));
+  ASSERT_AND_ASSIGN(auto cell_metas, BuildVortexCellMetas(footer_reader, "id"));
+  ASSERT_AND_ASSIGN(auto planner, VortexPlanner::Make(footer_reader, "id", cell_metas));
+  ASSERT_AND_ASSIGN(auto plan, planner->PlanForOffsets(std::vector<int64_t>{0}));
+
+  auto projected_schema = arrow::schema({schema_->GetFieldByName("id")});
+  auto vx_reader = vortex::VortexFormatReader(sparse_fs, projected_schema, kSparsePath, properties_, {"id"},
+                                              cgfile.Get<uint64_t>(api::kPropertyFileSize),
+                                              cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_STATUS_OK(vx_reader.open());
+
+  ASSERT_AND_ASSIGN(auto translater,
+                    VortexTranslater::Make(cell_metas, file_system_, test_file_name_, sparse_fs, kSparsePath));
+  auto cells = translater->get_cells(
+      nullptr, std::vector<milvus::cachinglayer::cid_t>(plan.cell_ids.begin(), plan.cell_ids.end()));
+  ASSERT_EQ(cells.size(), plan.cell_ids.size());
+
+  ASSERT_AND_ASSIGN(auto array_stream, vx_reader.read_with_plan(plan.read_plan));
+  ASSERT_AND_ASSIGN(auto chunked_array, arrow::ImportChunkedArray(&array_stream));
+  ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(rb->num_rows(), 1);
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
+  ASSERT_NE(id_array, nullptr);
+  ASSERT_EQ(id_array->Value(0), 0);
+}
+
 TEST_F(VortexLocalFormatTest, TestTranslaterLoadsAndReleasesCellRanges) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
