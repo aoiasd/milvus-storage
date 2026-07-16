@@ -18,6 +18,24 @@
 
 namespace milvus_storage::vortex {
 
+#ifdef MILVUS_STORAGE_WITH_VORTEX_IO_TRACE
+namespace {
+
+class AutoIOTraceSession {
+ public:
+  AutoIOTraceSession() { ResetIOTrace(); }
+
+  ~AutoIOTraceSession() {
+    PrintIOTrace();
+    DisableIOTrace();
+  }
+};
+
+AutoIOTraceSession g_auto_io_trace_session;
+
+}  // namespace
+#endif
+
 void ResetIOTrace() { ffi::reset_io_trace_ffi(); }
 
 void PrintIOTrace() { ffi::print_io_trace_ffi(); }
