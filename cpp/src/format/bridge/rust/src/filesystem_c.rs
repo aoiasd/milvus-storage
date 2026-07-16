@@ -136,7 +136,7 @@ mod io_trace_collector {
         });
     }
 
-    fn requests_per_second(requests: usize, interval_us: u64) -> f64 {
+    fn io_operations_per_second(requests: usize, interval_us: u64) -> f64 {
         if interval_us == 0 {
             return 0.0;
         }
@@ -178,9 +178,9 @@ mod io_trace_collector {
                 .min()
                 .unwrap_or(0);
         eprintln!(
-            "[IO Trace] total_requests={} qps={:.2} interval={:.3}s rounds={}",
+            "[IO Trace] total_requests={} iops={:.2} interval={:.3}s rounds={}",
             entries.len(),
-            requests_per_second(entries.len(), interval_us),
+            io_operations_per_second(entries.len(), interval_us),
             interval_us as f64 / 1_000_000.0,
             rounds.len()
         );
@@ -207,10 +207,10 @@ mod io_trace_collector {
                     .min()
                     .unwrap_or(0);
             eprintln!(
-                "[IO Trace][{}] requests={} qps={:.2} bytes={:.2}MB wall={:.1}ms",
+                "[IO Trace][{}] requests={} iops={:.2} bytes={:.2}MB wall={:.1}ms",
                 kind_name(kind),
                 kind_entries.len(),
-                requests_per_second(kind_entries.len(), interval_us),
+                io_operations_per_second(kind_entries.len(), interval_us),
                 kind_bytes as f64 / (1024.0 * 1024.0),
                 kind_wall_us as f64 / 1000.0
             );
@@ -334,9 +334,9 @@ mod io_trace_collector {
         }
 
         #[test]
-        fn qps_uses_full_window_duration() {
-            assert_eq!(requests_per_second(10, 2_000_000), 5.0);
-            assert_eq!(requests_per_second(10, 0), 0.0);
+        fn iops_uses_full_window_duration() {
+            assert_eq!(io_operations_per_second(10, 2_000_000), 5.0);
+            assert_eq!(io_operations_per_second(10, 0), 0.0);
         }
     }
 }
