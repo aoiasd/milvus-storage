@@ -26,8 +26,10 @@ class AutoIOTraceSession {
   AutoIOTraceSession() { ResetIOTrace(); }
 
   ~AutoIOTraceSession() {
-    PrintIOTrace();
-    DisableIOTrace();
+    if (IsIOTraceEnabled()) {
+      PrintIOTrace();
+      DisableIOTrace();
+    }
   }
 };
 
