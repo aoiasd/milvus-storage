@@ -41,15 +41,18 @@ mod io_trace_collector {
         enabled: bool,
         generation: u64,
         epoch: Instant,
+        window_started_at: Instant,
         entries: Vec<IoTraceEntry>,
         seq_counter: u32,
     }
 
     static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> = std::sync::LazyLock::new(|| {
+        let now = Instant::now();
         Mutex::new(IoTraceState {
             enabled: false,
             generation: 0,
-            epoch: Instant::now(),
+            epoch: now,
+            window_started_at: now,
             entries: Vec::new(),
             seq_counter: 0,
         })
@@ -73,9 +76,11 @@ mod io_trace_collector {
 
     pub(super) fn reset() {
         let mut state = IO_TRACE.lock().unwrap();
+        let now = Instant::now();
         state.enabled = true;
         state.generation = state.generation.wrapping_add(1);
-        state.epoch = Instant::now();
+        state.epoch = now;
+        state.window_started_at = now;
         state.entries.clear();
         state.seq_counter = 0;
     }
@@ -131,7 +136,14 @@ mod io_trace_collector {
         });
     }
 
-    fn print_entries(mut entries: Vec<IoTraceEntry>, print_empty: bool) {
+    fn requests_per_second(requests: usize, interval_us: u64) -> f64 {
+        if interval_us == 0 {
+            return 0.0;
+        }
+        requests as f64 * 1_000_000.0 / interval_us as f64
+    }
+
+    fn print_entries(mut entries: Vec<IoTraceEntry>, interval_us: u64, print_empty: bool) {
         if entries.is_empty() {
             if print_empty {
                 eprintln!("[IO Trace] No entries recorded");
@@ -166,8 +178,10 @@ mod io_trace_collector {
                 .min()
                 .unwrap_or(0);
         eprintln!(
-            "[IO Trace] {} total requests, {} rounds",
+            "[IO Trace] total_requests={} qps={:.2} interval={:.3}s rounds={}",
             entries.len(),
+            requests_per_second(entries.len(), interval_us),
+            interval_us as f64 / 1_000_000.0,
             rounds.len()
         );
         eprintln!(
@@ -181,9 +195,6 @@ mod io_trace_collector {
                 .iter()
                 .filter(|entry| same_kind(entry.kind, kind))
                 .collect();
-            if kind_entries.is_empty() {
-                continue;
-            }
             let kind_bytes: u64 = kind_entries.iter().map(|entry| entry.size).sum();
             let kind_wall_us = kind_entries
                 .iter()
@@ -196,9 +207,10 @@ mod io_trace_collector {
                     .min()
                     .unwrap_or(0);
             eprintln!(
-                "[IO Trace][{}] requests={} bytes={:.2}MB wall={:.1}ms",
+                "[IO Trace][{}] requests={} qps={:.2} bytes={:.2}MB wall={:.1}ms",
                 kind_name(kind),
                 kind_entries.len(),
+                requests_per_second(kind_entries.len(), interval_us),
                 kind_bytes as f64 / (1024.0 * 1024.0),
                 kind_wall_us as f64 / 1000.0
             );
@@ -238,20 +250,31 @@ mod io_trace_collector {
     }
 
     pub(super) fn print() {
-        let entries = IO_TRACE.lock().unwrap().entries.clone();
-        print_entries(entries, true);
+        let (entries, interval_us) = {
+            let state = IO_TRACE.lock().unwrap();
+            (
+                state.entries.clone(),
+                Instant::now()
+                    .duration_since(state.window_started_at)
+                    .as_micros() as u64,
+            )
+        };
+        print_entries(entries, interval_us, true);
     }
 
     pub(super) fn print_and_reset() {
-        let entries = {
+        let (entries, interval_us) = {
             let mut state = IO_TRACE.lock().unwrap();
             if !state.enabled {
                 return;
             }
+            let now = Instant::now();
+            let interval_us = now.duration_since(state.window_started_at).as_micros() as u64;
+            state.window_started_at = now;
             state.seq_counter = 0;
-            std::mem::take(&mut state.entries)
+            (std::mem::take(&mut state.entries), interval_us)
         };
-        print_entries(entries, false);
+        print_entries(entries, interval_us, false);
     }
 
     #[cfg(test)]
@@ -308,6 +331,12 @@ mod io_trace_collector {
             assert_eq!(state.entries[0].size, 20);
             drop(state);
             disable();
+        }
+
+        #[test]
+        fn qps_uses_full_window_duration() {
+            assert_eq!(requests_per_second(10, 2_000_000), 5.0);
+            assert_eq!(requests_per_second(10, 0), 0.0);
         }
     }
 }
