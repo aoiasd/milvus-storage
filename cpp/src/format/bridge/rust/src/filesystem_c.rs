@@ -131,15 +131,14 @@ mod io_trace_collector {
         });
     }
 
-    pub(super) fn print() {
-        let state = IO_TRACE.lock().unwrap();
-        if state.entries.is_empty() {
-            eprintln!("[IO Trace] No entries recorded");
+    fn print_entries(mut entries: Vec<IoTraceEntry>, print_empty: bool) {
+        if entries.is_empty() {
+            if print_empty {
+                eprintln!("[IO Trace] No entries recorded");
+            }
             return;
         }
 
-        let mut entries = state.entries.clone();
-        drop(state);
         entries.sort_by_key(|entry| entry.start_us);
 
         let mut rounds: Vec<Vec<&IoTraceEntry>> = Vec::new();
@@ -238,6 +237,23 @@ mod io_trace_collector {
         }
     }
 
+    pub(super) fn print() {
+        let entries = IO_TRACE.lock().unwrap().entries.clone();
+        print_entries(entries, true);
+    }
+
+    pub(super) fn print_and_reset() {
+        let entries = {
+            let mut state = IO_TRACE.lock().unwrap();
+            if !state.enabled {
+                return;
+            }
+            state.seq_counter = 0;
+            std::mem::take(&mut state.entries)
+        };
+        print_entries(entries, false);
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -277,6 +293,22 @@ mod io_trace_collector {
             drop(state);
             disable();
         }
+
+        #[test]
+        fn interval_rollover_preserves_in_flight_events() {
+            let _test_guard = TEST_MUTEX.lock().unwrap();
+            reset();
+            let in_flight = begin(IoTraceKind::LocalRead);
+
+            print_and_reset();
+            end(in_flight, 10, 20);
+
+            let state = IO_TRACE.lock().unwrap();
+            assert_eq!(state.entries.len(), 1);
+            assert_eq!(state.entries[0].size, 20);
+            drop(state);
+            disable();
+        }
     }
 }
 
@@ -301,6 +333,7 @@ mod io_trace_collector {
     pub(super) fn print() {
         eprintln!("[IO Trace] Disabled at build time; configure WITH_VORTEX_IO_TRACE=ON");
     }
+    pub(super) fn print_and_reset() {}
 }
 
 pub(crate) fn reset_io_trace() {
@@ -325,6 +358,10 @@ pub(crate) fn end_io_trace(token: IoTraceToken, offset: u64, size: u64) {
 
 pub(crate) fn print_io_trace() {
     io_trace_collector::print();
+}
+
+pub(crate) fn print_and_reset_io_trace() {
+    io_trace_collector::print_and_reset();
 }
 
 fn record_io_start() -> IoTraceToken {

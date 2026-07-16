@@ -14,6 +14,12 @@
 
 #include "milvus-storage/format/vortex/vortex_io_trace.h"
 
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+
 #include "vortex_bridge.h"
 
 namespace milvus_storage::vortex {
@@ -21,16 +27,60 @@ namespace milvus_storage::vortex {
 #ifdef MILVUS_STORAGE_WITH_VORTEX_IO_TRACE
 namespace {
 
+constexpr auto kDefaultTraceInterval = std::chrono::seconds(60);
+
+std::chrono::seconds GetTraceInterval() {
+  const char* value = std::getenv("MILVUS_STORAGE_VORTEX_IO_TRACE_INTERVAL_SECONDS");
+  if (value == nullptr) {
+    return kDefaultTraceInterval;
+  }
+
+  char* end = nullptr;
+  const auto seconds = std::strtoll(value, &end, 10);
+  if (end == value || *end != '\0' || seconds <= 0) {
+    return kDefaultTraceInterval;
+  }
+  return std::chrono::seconds(seconds);
+}
+
 class AutoIOTraceSession {
- public:
-  AutoIOTraceSession() { ResetIOTrace(); }
+  public:
+  AutoIOTraceSession() : interval_(GetTraceInterval()) {
+    ResetIOTrace();
+    reporter_ = std::thread([this]() { ReportLoop(); });
+  }
 
   ~AutoIOTraceSession() {
+    {
+      std::lock_guard lock(mutex_);
+      stopped_ = true;
+    }
+    wakeup_.notify_all();
+    reporter_.join();
+
     if (IsIOTraceEnabled()) {
       PrintIOTrace();
       DisableIOTrace();
     }
   }
+
+  private:
+  void ReportLoop() {
+    std::unique_lock lock(mutex_);
+    while (!wakeup_.wait_for(lock, interval_, [this]() { return stopped_; })) {
+      lock.unlock();
+      if (IsIOTraceEnabled()) {
+        PrintAndResetIOTrace();
+      }
+      lock.lock();
+    }
+  }
+
+  const std::chrono::seconds interval_;
+  std::mutex mutex_;
+  std::condition_variable wakeup_;
+  bool stopped_{false};
+  std::thread reporter_;
 };
 
 AutoIOTraceSession g_auto_io_trace_session;
@@ -41,6 +91,8 @@ AutoIOTraceSession g_auto_io_trace_session;
 void ResetIOTrace() { ffi::reset_io_trace_ffi(); }
 
 void PrintIOTrace() { ffi::print_io_trace_ffi(); }
+
+void PrintAndResetIOTrace() { ffi::print_and_reset_io_trace_ffi(); }
 
 void DisableIOTrace() { ffi::disable_io_trace_ffi(); }
 

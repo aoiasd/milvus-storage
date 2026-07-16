@@ -1891,6 +1891,10 @@ pub fn print_io_trace_ffi() {
     crate::filesystem_c::print_io_trace();
 }
 
+pub fn print_and_reset_io_trace_ffi() {
+    crate::filesystem_c::print_and_reset_io_trace();
+}
+
 pub fn disable_io_trace_ffi() {
     crate::filesystem_c::disable_io_trace();
 }

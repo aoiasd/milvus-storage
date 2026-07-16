@@ -18,9 +18,11 @@ namespace milvus_storage::vortex {
 
 // These functions are no-ops unless milvus-storage is built with
 // WITH_VORTEX_IO_TRACE=ON. Trace-enabled builds automatically reset the
-// process-wide collector at library initialization and print it at shutdown.
+// process-wide collector at library initialization, report fixed time windows,
+// and print the final partial window at shutdown.
 void ResetIOTrace();
 void PrintIOTrace();
+void PrintAndResetIOTrace();
 void DisableIOTrace();
 bool IsIOTraceEnabled();
 

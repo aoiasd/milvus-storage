@@ -342,6 +342,7 @@ pub mod vortex_ffi {
         // IO trace
         fn reset_io_trace_ffi();
         fn print_io_trace_ffi();
+        fn print_and_reset_io_trace_ffi();
         fn disable_io_trace_ffi();
         fn io_trace_enabled_ffi() -> bool;
         fn begin_io_trace_ffi(kind: IoTraceKind) -> IoTraceToken;
