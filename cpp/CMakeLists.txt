@@ -13,6 +13,7 @@ option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(WITH_CRT "Build with AWS S3 CRT support." OFF)
+option(WITH_VORTEX_IO_TRACE "Build Vortex local/source IO trace diagnostics." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 if (WITH_CRT)
@@ -59,6 +60,10 @@ endif()
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
+if(WITH_VORTEX_IO_TRACE)
+  list(APPEND CORROSION_FEATURES io-trace)
+  message(STATUS "Vortex IO trace diagnostics enabled")
+endif()
 add_subdirectory(${RUST_BRIDGE_PATH})
 
 list(APPEND LINK_LIBS prsbridge)
@@ -150,6 +155,9 @@ endif()
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
+if(WITH_VORTEX_IO_TRACE)
+  target_compile_definitions(milvus-storage PRIVATE MILVUS_STORAGE_WITH_VORTEX_IO_TRACE=1)
+endif()
 
 # On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
 # losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.

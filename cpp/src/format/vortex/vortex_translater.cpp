@@ -22,6 +22,9 @@
 #include <arrow/io/interfaces.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/format/vortex/vortex_io_trace.h"
+
 namespace milvus_storage::vortex {
 
 namespace {
@@ -109,11 +112,22 @@ arrow::Result<std::unique_ptr<VortexTranslater>> VortexTranslater::Make(
 
   ARROW_ASSIGN_OR_RAISE(auto input_file, source_fs->OpenInputFile(source_path));
 
-  auto loader = [input_file, range_file,
-                 cell_metas](const std::vector<milvus::cachinglayer::cid_t>& cids) -> arrow::Status {
-    for (const auto& byte_range : MergeCellByteRanges(*cell_metas, cids)) {
+  auto loader = [input_file, range_file, cell_metas,
+                 source_path](const std::vector<milvus::cachinglayer::cid_t>& cids) -> arrow::Status {
+    auto byte_ranges = MergeCellByteRanges(*cell_metas, cids);
+    for (const auto& byte_range : byte_ranges) {
       ARROW_RETURN_NOT_OK(FillVortexRangeFile(input_file, range_file, byte_range.offset, byte_range.length));
     }
+#ifdef MILVUS_STORAGE_WITH_VORTEX_IO_TRACE
+    if (IsIOTraceEnabled()) {
+      uint64_t source_bytes = 0;
+      for (const auto& byte_range : byte_ranges) {
+        source_bytes = CheckedAddByteSize(source_bytes, byte_range.length, "Vortex source IO byte size");
+      }
+      LOG_STORAGE_INFO_ << fmt::format("[VortexCellLoad] path={} cells={} source_io_count={} source_io_bytes={}",
+                                       source_path, cids.size(), byte_ranges.size(), source_bytes);
+    }
+#endif
     return arrow::Status::OK();
   };
 

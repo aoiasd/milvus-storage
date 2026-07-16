@@ -32,6 +32,7 @@ class StorageConan(ConanFile):
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
         "with_crt": [True, False],
+        "with_vortex_io_trace": [True, False],
     }
     default_options = {
         "shared": True,
@@ -45,6 +46,7 @@ class StorageConan(ConanFile):
         "with_python_binding": False,
         "with_fiu": False,
         "with_crt": False,
+        "with_vortex_io_trace": False,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
@@ -243,6 +245,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
         tc.variables["WITH_CRT"] = self.options.with_crt
+        tc.variables["WITH_VORTEX_IO_TRACE"] = self.options.with_vortex_io_trace
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

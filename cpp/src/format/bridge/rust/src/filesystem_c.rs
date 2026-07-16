@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "io-trace")]
 use std::time::Instant;
 
 use async_compat::Compat;
@@ -12,152 +13,326 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 
 use vortex::buffer::{ByteBuffer, ByteBufferMut};
-use vortex::error::{vortex_err, VortexError, VortexResult};
+use vortex::error::{VortexError, VortexResult, vortex_err};
 use vortex::io::file::{CoalesceWindow, IntoReadSource, IoRequest, ReadSource, ReadSourceRef};
 use vortex::io::runtime::Handle;
+
+use crate::vortex_ffi::{IoTraceKind, IoTraceToken};
 
 //=============================================================================
 // IO Trace Collector
 //=============================================================================
 
-#[derive(Clone)]
-struct IoTraceEntry {
-    seq: u32,
-    start_us: u64, // microseconds since trace reset
-    end_us: u64,
-    offset: u64,
-    size: u64,
+#[cfg(feature = "io-trace")]
+mod io_trace_collector {
+    use super::*;
+
+    #[derive(Clone)]
+    struct IoTraceEntry {
+        seq: u32,
+        kind: IoTraceKind,
+        start_us: u64,
+        end_us: u64,
+        offset: u64,
+        size: u64,
+    }
+
+    struct IoTraceState {
+        enabled: bool,
+        generation: u64,
+        epoch: Instant,
+        entries: Vec<IoTraceEntry>,
+        seq_counter: u32,
+    }
+
+    static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> = std::sync::LazyLock::new(|| {
+        Mutex::new(IoTraceState {
+            enabled: false,
+            generation: 0,
+            epoch: Instant::now(),
+            entries: Vec::new(),
+            seq_counter: 0,
+        })
+    });
+
+    fn kind_name(kind: IoTraceKind) -> &'static str {
+        match kind {
+            IoTraceKind::LocalRead => "LOCAL_READ",
+            IoTraceKind::SourceRead => "SOURCE_READ",
+            _ => "UNKNOWN",
+        }
+    }
+
+    fn same_kind(lhs: IoTraceKind, rhs: IoTraceKind) -> bool {
+        matches!(
+            (lhs, rhs),
+            (IoTraceKind::LocalRead, IoTraceKind::LocalRead)
+                | (IoTraceKind::SourceRead, IoTraceKind::SourceRead)
+        )
+    }
+
+    pub(super) fn reset() {
+        let mut state = IO_TRACE.lock().unwrap();
+        state.enabled = true;
+        state.generation = state.generation.wrapping_add(1);
+        state.epoch = Instant::now();
+        state.entries.clear();
+        state.seq_counter = 0;
+    }
+
+    pub(super) fn disable() {
+        let mut state = IO_TRACE.lock().unwrap();
+        state.enabled = false;
+        state.generation = state.generation.wrapping_add(1);
+        state.entries.clear();
+    }
+
+    pub(super) fn enabled() -> bool {
+        IO_TRACE.lock().unwrap().enabled
+    }
+
+    pub(super) fn begin(kind: IoTraceKind) -> IoTraceToken {
+        let state = IO_TRACE.lock().unwrap();
+        if !state.enabled {
+            return IoTraceToken {
+                enabled: false,
+                generation: state.generation,
+                start_us: 0,
+                kind,
+            };
+        }
+        IoTraceToken {
+            enabled: true,
+            generation: state.generation,
+            start_us: Instant::now().duration_since(state.epoch).as_micros() as u64,
+            kind,
+        }
+    }
+
+    pub(super) fn end(token: IoTraceToken, offset: u64, size: u64) {
+        if !token.enabled {
+            return;
+        }
+        let now = Instant::now();
+        let mut state = IO_TRACE.lock().unwrap();
+        if !state.enabled || state.generation != token.generation {
+            return;
+        }
+        let seq = state.seq_counter;
+        state.seq_counter += 1;
+        let end_us = now.duration_since(state.epoch).as_micros() as u64;
+        state.entries.push(IoTraceEntry {
+            seq,
+            kind: token.kind,
+            start_us: token.start_us,
+            end_us,
+            offset,
+            size,
+        });
+    }
+
+    pub(super) fn print() {
+        let state = IO_TRACE.lock().unwrap();
+        if state.entries.is_empty() {
+            eprintln!("[IO Trace] No entries recorded");
+            return;
+        }
+
+        let mut entries = state.entries.clone();
+        drop(state);
+        entries.sort_by_key(|entry| entry.start_us);
+
+        let mut rounds: Vec<Vec<&IoTraceEntry>> = Vec::new();
+        let mut current_round: Vec<&IoTraceEntry> = Vec::new();
+        let mut round_end_us = 0;
+        for entry in &entries {
+            if current_round.is_empty() || entry.start_us < round_end_us + 2000 {
+                current_round.push(entry);
+                round_end_us = round_end_us.max(entry.end_us);
+            } else {
+                rounds.push(current_round);
+                current_round = vec![entry];
+                round_end_us = entry.end_us;
+            }
+        }
+        if !current_round.is_empty() {
+            rounds.push(current_round);
+        }
+
+        let total_bytes: u64 = entries.iter().map(|entry| entry.size).sum();
+        let wall_us = entries.iter().map(|entry| entry.end_us).max().unwrap_or(0)
+            - entries
+                .iter()
+                .map(|entry| entry.start_us)
+                .min()
+                .unwrap_or(0);
+        eprintln!(
+            "[IO Trace] {} total requests, {} rounds",
+            entries.len(),
+            rounds.len()
+        );
+        eprintln!(
+            "[IO Trace] total_bytes={:.2}MB wall={:.1}ms",
+            total_bytes as f64 / (1024.0 * 1024.0),
+            wall_us as f64 / 1000.0
+        );
+
+        for kind in [IoTraceKind::LocalRead, IoTraceKind::SourceRead] {
+            let kind_entries: Vec<_> = entries
+                .iter()
+                .filter(|entry| same_kind(entry.kind, kind))
+                .collect();
+            if kind_entries.is_empty() {
+                continue;
+            }
+            let kind_bytes: u64 = kind_entries.iter().map(|entry| entry.size).sum();
+            let kind_wall_us = kind_entries
+                .iter()
+                .map(|entry| entry.end_us)
+                .max()
+                .unwrap_or(0)
+                - kind_entries
+                    .iter()
+                    .map(|entry| entry.start_us)
+                    .min()
+                    .unwrap_or(0);
+            eprintln!(
+                "[IO Trace][{}] requests={} bytes={:.2}MB wall={:.1}ms",
+                kind_name(kind),
+                kind_entries.len(),
+                kind_bytes as f64 / (1024.0 * 1024.0),
+                kind_wall_us as f64 / 1000.0
+            );
+        }
+
+        for (round_index, round) in rounds.iter().enumerate() {
+            let round_start = round.iter().map(|entry| entry.start_us).min().unwrap_or(0);
+            let round_end = round.iter().map(|entry| entry.end_us).max().unwrap_or(0);
+            let longest = round
+                .iter()
+                .map(|entry| entry.end_us - entry.start_us)
+                .max()
+                .unwrap_or(0);
+            let round_bytes: u64 = round.iter().map(|entry| entry.size).sum();
+            eprintln!(
+                "    R{} - {} req, wall={:.1}ms, longest={:.1}ms, bytes={:.2}MB",
+                round_index + 1,
+                round.len(),
+                (round_end - round_start) as f64 / 1000.0,
+                longest as f64 / 1000.0,
+                round_bytes as f64 / (1024.0 * 1024.0)
+            );
+            for entry in round {
+                eprintln!(
+                    "      seq={:<3} kind={:<11} start={:>8.1}ms end={:>8.1}ms dur={:>6.1}ms size={:>8} range={}..{}",
+                    entry.seq,
+                    kind_name(entry.kind),
+                    entry.start_us as f64 / 1000.0,
+                    entry.end_us as f64 / 1000.0,
+                    (entry.end_us - entry.start_us) as f64 / 1000.0,
+                    entry.size,
+                    entry.offset,
+                    entry.offset + entry.size
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        static TEST_MUTEX: std::sync::LazyLock<Mutex<()>> =
+            std::sync::LazyLock::new(|| Mutex::new(()));
+
+        #[test]
+        fn records_local_and_source_reads() {
+            let _test_guard = TEST_MUTEX.lock().unwrap();
+            reset();
+
+            let local = begin(IoTraceKind::LocalRead);
+            end(local, 10, 20);
+            let source = begin(IoTraceKind::SourceRead);
+            end(source, 30, 40);
+
+            let state = IO_TRACE.lock().unwrap();
+            assert_eq!(state.entries.len(), 2);
+            assert_eq!(kind_name(state.entries[0].kind), "LOCAL_READ");
+            assert_eq!(kind_name(state.entries[1].kind), "SOURCE_READ");
+            drop(state);
+            disable();
+        }
+
+        #[test]
+        fn reset_discards_in_flight_events_from_previous_generation() {
+            let _test_guard = TEST_MUTEX.lock().unwrap();
+            reset();
+            let stale = begin(IoTraceKind::LocalRead);
+
+            reset();
+            end(stale, 10, 20);
+
+            let state = IO_TRACE.lock().unwrap();
+            assert!(state.entries.is_empty());
+            drop(state);
+            disable();
+        }
+    }
 }
 
-struct IoTraceState {
-    enabled: bool,
-    epoch: Instant,
-    entries: Vec<IoTraceEntry>,
-    seq_counter: u32,
-}
+#[cfg(not(feature = "io-trace"))]
+mod io_trace_collector {
+    use super::*;
 
-static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> = std::sync::LazyLock::new(|| {
-    Mutex::new(IoTraceState {
-        enabled: false,
-        epoch: Instant::now(),
-        entries: Vec::new(),
-        seq_counter: 0,
-    })
-});
+    pub(super) fn reset() {}
+    pub(super) fn disable() {}
+    pub(super) fn enabled() -> bool {
+        false
+    }
+    pub(super) fn begin(kind: IoTraceKind) -> IoTraceToken {
+        IoTraceToken {
+            enabled: false,
+            generation: 0,
+            start_us: 0,
+            kind,
+        }
+    }
+    pub(super) fn end(_token: IoTraceToken, _offset: u64, _size: u64) {}
+    pub(super) fn print() {
+        eprintln!("[IO Trace] Disabled at build time; configure WITH_VORTEX_IO_TRACE=ON");
+    }
+}
 
 pub(crate) fn reset_io_trace() {
-    let mut state = IO_TRACE.lock().unwrap();
-    state.enabled = true;
-    state.epoch = Instant::now();
-    state.entries.clear();
-    state.seq_counter = 0;
+    io_trace_collector::reset();
 }
 
 pub(crate) fn disable_io_trace() {
-    let mut state = IO_TRACE.lock().unwrap();
-    state.enabled = false;
-    state.entries.clear();
+    io_trace_collector::disable();
 }
 
-fn record_io_start() -> (bool, Instant) {
-    let state = IO_TRACE.lock().unwrap();
-    (state.enabled, Instant::now())
+pub(crate) fn io_trace_enabled() -> bool {
+    io_trace_collector::enabled()
 }
 
-fn record_io_end(enabled: bool, start_instant: Instant, offset: u64, size: u64) {
-    if !enabled {
-        return;
-    }
-    let mut state = IO_TRACE.lock().unwrap();
-    let epoch = state.epoch;
-    let seq = state.seq_counter;
-    state.seq_counter += 1;
-    state.entries.push(IoTraceEntry {
-        seq,
-        start_us: start_instant.duration_since(epoch).as_micros() as u64,
-        end_us: Instant::now().duration_since(epoch).as_micros() as u64,
-        offset,
-        size,
-    });
+pub(crate) fn begin_io_trace(kind: IoTraceKind) -> IoTraceToken {
+    io_trace_collector::begin(kind)
+}
+
+pub(crate) fn end_io_trace(token: IoTraceToken, offset: u64, size: u64) {
+    io_trace_collector::end(token, offset, size);
 }
 
 pub(crate) fn print_io_trace() {
-    let state = IO_TRACE.lock().unwrap();
-    if state.entries.is_empty() {
-        eprintln!("[IO Trace] No entries recorded");
-        return;
-    }
+    io_trace_collector::print();
+}
 
-    let mut entries = state.entries.clone();
-    entries.sort_by_key(|e| e.start_us);
+fn record_io_start() -> IoTraceToken {
+    begin_io_trace(IoTraceKind::LocalRead)
+}
 
-    // Group into rounds: a new round starts when a request's start_us is after
-    // the previous request's end_us (i.e., sequential dependency).
-    let mut rounds: Vec<Vec<&IoTraceEntry>> = Vec::new();
-    let mut current_round: Vec<&IoTraceEntry> = Vec::new();
-    let mut round_end_us: u64 = 0;
-
-    for entry in &entries {
-        if current_round.is_empty() || entry.start_us < round_end_us + 2000 {
-            current_round.push(entry);
-            if entry.end_us > round_end_us {
-                round_end_us = entry.end_us;
-            }
-        } else {
-            rounds.push(current_round);
-            current_round = vec![entry];
-            round_end_us = entry.end_us;
-        }
-    }
-    if !current_round.is_empty() {
-        rounds.push(current_round);
-    }
-
-    eprintln!(
-        "[IO Trace] {} total requests, {} rounds",
-        entries.len(),
-        rounds.len()
-    );
-    let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
-    let wall_us = entries.iter().map(|e| e.end_us).max().unwrap_or(0)
-        - entries.iter().map(|e| e.start_us).min().unwrap_or(0);
-    eprintln!(
-        "[IO Trace] total_bytes={:.2}MB  wall={:.1}ms",
-        total_bytes as f64 / (1024.0 * 1024.0),
-        wall_us as f64 / 1000.0
-    );
-
-    for (ri, round) in rounds.iter().enumerate() {
-        let r_start = round.iter().map(|e| e.start_us).min().unwrap_or(0);
-        let r_end = round.iter().map(|e| e.end_us).max().unwrap_or(0);
-        let r_wall = r_end - r_start;
-        let longest = round
-            .iter()
-            .map(|e| e.end_us - e.start_us)
-            .max()
-            .unwrap_or(0);
-        let r_bytes: u64 = round.iter().map(|e| e.size).sum();
-        eprintln!(
-            "    R{} - {} req, wall={:.1}ms, longest={:.1}ms, bytes={:.2}MB",
-            ri + 1,
-            round.len(),
-            r_wall as f64 / 1000.0,
-            longest as f64 / 1000.0,
-            r_bytes as f64 / (1024.0 * 1024.0)
-        );
-        for entry in round.iter() {
-            eprintln!(
-                "      seq={:<3} start={:>8.1}ms end={:>8.1}ms dur={:>6.1}ms size={:>8} range={}..{}",
-                entry.seq,
-                entry.start_us as f64 / 1000.0,
-                entry.end_us as f64 / 1000.0,
-                (entry.end_us - entry.start_us) as f64 / 1000.0,
-                entry.size,
-                entry.offset,
-                entry.offset + entry.size
-            );
-        }
-    }
+fn record_io_end(token: IoTraceToken, offset: u64, size: u64) {
+    end_io_trace(token, offset, size);
 }
 
 #[repr(C)]
@@ -555,20 +730,20 @@ impl ReadSource for ObjectStoreIoSourceCpp {
                 let blocking = self
                     .handle
                     .spawn_blocking(move || -> VortexResult<ByteBuffer> {
-                        let (trace_enabled, trace_start) = record_io_start();
                         let mut buffer =
                             ByteBufferMut::with_capacity_aligned(len as usize, alignment);
                         let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
 
+                        let trace_token = record_io_start();
                         let mut result = unsafe {
                             loon_filesystem_reader_readat(reader.as_ptr(), start, len, out_data)
                         };
+                        record_io_end(trace_token, start, len);
 
                         check_loon_ffi_result(
                             &mut result,
                             "Failed to readat from ObjectStoreIoSourceCpp",
                         )?;
-                        record_io_end(trace_enabled, trace_start, start, len);
 
                         unsafe { buffer.set_len(len as usize) };
 

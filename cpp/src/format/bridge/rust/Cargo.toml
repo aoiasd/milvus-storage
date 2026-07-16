@@ -7,6 +7,10 @@ edition = "2024"
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+default = []
+io-trace = []
+
 [dependencies]
 # common dependencies
 anyhow = "1.0.99"

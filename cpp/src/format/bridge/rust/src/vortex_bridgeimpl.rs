@@ -1895,6 +1895,18 @@ pub fn disable_io_trace_ffi() {
     crate::filesystem_c::disable_io_trace();
 }
 
+pub fn io_trace_enabled_ffi() -> bool {
+    crate::filesystem_c::io_trace_enabled()
+}
+
+pub fn begin_io_trace_ffi(kind: ffi::IoTraceKind) -> ffi::IoTraceToken {
+    crate::filesystem_c::begin_io_trace(kind)
+}
+
+pub fn end_io_trace_ffi(token: ffi::IoTraceToken, offset: u64, size: u64) {
+    crate::filesystem_c::end_io_trace(token, offset, size);
+}
+
 pub fn reset_row_group_zone_map_pruning_stats_ffi() {
     crate::vortex_layout_strategy_v2::reset_row_group_zone_map_pruning_stats();
 }

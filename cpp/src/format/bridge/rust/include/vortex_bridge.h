@@ -333,14 +333,11 @@ class ScanBuilder {
   rust::Box<ffi::VortexScanBuilder> impl_;
 };
 
-/// IO trace: enable tracing and reset state
-inline void ResetIOTrace() { ffi::reset_io_trace_ffi(); }
+inline ffi::IoTraceToken BeginIOTrace(ffi::IoTraceKind kind) { return ffi::begin_io_trace_ffi(kind); }
 
-/// IO trace: print collected trace to stderr
-inline void PrintIOTrace() { ffi::print_io_trace_ffi(); }
-
-/// IO trace: disable and clear
-inline void DisableIOTrace() { ffi::disable_io_trace_ffi(); }
+inline void EndIOTrace(ffi::IoTraceToken token, uint64_t offset, uint64_t size) {
+  ffi::end_io_trace_ffi(token, offset, size);
+}
 
 struct RowGroupZoneMapPruningStats {
   uint64_t prune_eval_count = 0;

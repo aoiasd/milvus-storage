@@ -67,7 +67,14 @@ arrow::Status FillVortexRangeFile(const std::shared_ptr<arrow::io::RandomAccessF
     return arrow::Status::Invalid(
         fmt::format("Vortex sparse range exceeds Arrow IO limits, offset={}, length={}", offset, length));
   }
+#ifdef MILVUS_STORAGE_WITH_VORTEX_IO_TRACE
+  auto trace_token = BeginIOTrace(ffi::IoTraceKind::SourceRead);
+  auto data_result = source_file->ReadAt(static_cast<int64_t>(offset), static_cast<int64_t>(length));
+  EndIOTrace(trace_token, offset, length);
+  ARROW_ASSIGN_OR_RAISE(auto data, std::move(data_result));
+#else
   ARROW_ASSIGN_OR_RAISE(auto data, source_file->ReadAt(static_cast<int64_t>(offset), static_cast<int64_t>(length)));
+#endif
   if (!data || static_cast<uint64_t>(data->size()) != length) {
     return arrow::Status::IOError(
         fmt::format("Short read while filling vortex sparse file, offset={}, expect={}, got={}", offset, length,

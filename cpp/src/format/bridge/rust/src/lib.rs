@@ -195,6 +195,21 @@ pub mod vortex_ffi {
         pruned_row_group_count: u64,
     }
 
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy)]
+    enum IoTraceKind {
+        LocalRead = 0,
+        SourceRead = 1,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct IoTraceToken {
+        enabled: bool,
+        generation: u64,
+        start_us: u64,
+        kind: IoTraceKind,
+    }
+
     extern "Rust" {
         type DType;
         // Factory functions for creating DType
@@ -328,6 +343,9 @@ pub mod vortex_ffi {
         fn reset_io_trace_ffi();
         fn print_io_trace_ffi();
         fn disable_io_trace_ffi();
+        fn io_trace_enabled_ffi() -> bool;
+        fn begin_io_trace_ffi(kind: IoTraceKind) -> IoTraceToken;
+        fn end_io_trace_ffi(token: IoTraceToken, offset: u64, size: u64);
 
         // Row-group zonemap pruning diagnostics
         fn reset_row_group_zone_map_pruning_stats_ffi();
